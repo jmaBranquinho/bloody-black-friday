@@ -141,7 +141,15 @@
   .opts label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
   .small-note { font-family: system-ui, sans-serif; font-size: 12px; opacity: .65; margin-top: 8px; }
 
-  #touch { position: fixed; inset: auto 0 0 0; height: 0; z-index: 4; }
+  #touch { position: fixed; inset: 0; z-index: 2; pointer-events: none; }
+  .tz { position: absolute; top: 0; bottom: 0; width: 50%; display: flex; align-items: flex-end; padding: 0 0 70px; transition: background .1s; }
+  .tz.l { left: 0; justify-content: flex-start; padding-left: 22px; }
+  .tz.r { right: 0; justify-content: flex-end; padding-right: 22px; }
+  .tz span { font-size: 44px; color: rgba(255,255,255,.55); text-shadow: 2px 2px 0 rgba(0,0,0,.5); }
+  .tz.on { background: rgba(255,214,10,.10); }
+  .tz.on span { color: var(--yel); }
+  #touch.both .tz { background: rgba(230,57,70,.14); }
+  .tzHint { position: absolute; left: 0; right: 0; bottom: 40px; text-align: center; font-size: 13px; letter-spacing: 1px; color: rgba(255,255,255,.7); text-shadow: 1px 1px 0 #000; }
   .tb {
     position: fixed; bottom: 18px; width: 74px; height: 74px; border-radius: 50%;
     background: rgba(17,19,24,.55); border: 3px solid rgba(255,255,255,.6); color: #fff;
@@ -191,10 +199,9 @@
 <div id="fps" hidden style="position:fixed;left:50%;bottom:2px;transform:translateX(-50%);font:12px monospace;color:#fff;background:rgba(0,0,0,.6);padding:1px 6px;border-radius:3px;z-index:6;pointer-events:none"></div>
 
 <div id="touch" hidden>
-  <div class="tb" data-k="left" style="left:14px">&#9664;</div>
-  <div class="tb" data-k="right" style="left:96px">&#9654;</div>
-  <div class="tb" data-k="brake" style="right:96px;font-size:18px">BRAKE</div>
-  <div class="tb" data-k="gas" style="right:14px;bottom:100px">PUSH</div>
+  <div class="tz l" id="tzL"><span>&#9664;</span></div>
+  <div class="tz r" id="tzR"><span>&#9654;</span></div>
+  <div class="tzHint">HOLD A SIDE TO STEER &middot; BOTH SIDES TO BRAKE / REVERSE</div>
 </div>
 
 <div id="menu" class="overlay">
@@ -1793,9 +1800,16 @@ function updateRacer(r, dt) {
 // ---------------------------------------------------------------- input
 const keys = {}, touch = { left: false, right: false, gas: false, brake: false, boost: false };
 function playerDrive(r, dt) {
-  const up = keys.KeyW || keys.ArrowUp || touch.gas, dn = keys.KeyS || keys.ArrowDown || touch.brake;
-  const L = keys.KeyA || keys.ArrowLeft || touch.left, R = keys.KeyD || keys.ArrowRight || touch.right;
-  const thr = up ? 1 : dn ? -1 : 0, steer = (R ? 1 : 0) - (L ? 1 : 0);
+  const up = keys.KeyW || keys.ArrowUp, dn = keys.KeyS || keys.ArrowDown;
+  let L = keys.KeyA || keys.ArrowLeft, R = keys.KeyD || keys.ArrowRight;
+  let thr = up ? 1 : dn ? -1 : 0;
+  if (touchMode) {
+    // phones: always pushing; hold a side to steer, both sides to brake / reverse
+    const both = touch.left && touch.right;
+    if (!up && !dn) thr = both ? -1 : 1;
+    if (!both) { L = L || touch.left; R = R || touch.right; }
+  }
+  const steer = (R ? 1 : 0) - (L ? 1 : 0);
   r.steerS = lerp(r.steerS, steer, Math.min(1, dt * 9));
   controls(r, thr, r.steerS, dt);
 }
@@ -1829,11 +1843,25 @@ addEventListener('keyup', (e) => { keys[e.code] = false; });
 addEventListener('blur', () => { for (const k in keys) keys[k] = false; if (state === 'play') setPause(true); });
 document.addEventListener('visibilitychange', () => { if (document.hidden && state === 'play') setPause(true); });
 const coarse = matchMedia('(pointer: coarse)').matches;
-for (const el of document.querySelectorAll('.tb')) {
-  const k = el.dataset.k;
-  const on = (v) => (e) => { e.preventDefault(); ensureAudio(); touch[k] = v; el.classList.toggle('on', v); };
-  el.addEventListener('pointerdown', on(true)); el.addEventListener('pointerup', on(false)); el.addEventListener('pointercancel', on(false)); el.addEventListener('pointerleave', on(false));
+// touch: each finger counts for whichever half of the screen it's on
+let touchMode = coarse;
+const fingers = new Map();
+function syncTouch() {
+  let l = false, r = false;
+  for (const x of fingers.values()) { if (x < innerWidth / 2) l = true; else r = true; }
+  touch.left = l; touch.right = r;
+  $('tzL').classList.toggle('on', l); $('tzR').classList.toggle('on', r);
+  $('touch').classList.toggle('both', l && r);
 }
+addEventListener('pointerdown', (e) => {
+  if (e.pointerType !== 'touch') return;
+  touchMode = true;
+  if (state !== 'play') return;
+  ensureAudio();
+  fingers.set(e.pointerId, e.clientX); syncTouch();
+});
+addEventListener('pointermove', (e) => { if (fingers.has(e.pointerId)) { fingers.set(e.pointerId, e.clientX); syncTouch(); } });
+for (const ev of ['pointerup', 'pointercancel']) addEventListener(ev, (e) => { if (fingers.delete(e.pointerId)) syncTouch(); });
 
 // ---------------------------------------------------------------- deals
 const deal = { st: 'idle', t: 3, prod: null, spot: null, units: 0, total: 0, ped: null, unitObjs: [], left: 0, dur: 70, label: null, last: null };
@@ -2264,7 +2292,7 @@ function startGame() {
   ensureAudio();
   if ('speechSynthesis' in window) speechSynthesis.getVoices();
   state = 'play';
-  $('menu').hidden = true; $('hud').hidden = false; $('touch').hidden = !coarse;
+  $('menu').hidden = true; $('hud').hidden = false; $('touch').hidden = !touchMode;
   // everyone lines up at the doors
   for (const r of competitors) {
     if (r.state !== 'drive') { if (r.state === 'off') r.state = 'drive'; reattach(r, 0, SPAWN_Z, 0); }
@@ -2291,6 +2319,7 @@ function setPause(p) {
   state = p ? 'paused' : 'play';
   $('pause').hidden = !p;
   for (const k in keys) keys[k] = false;
+  fingers.clear(); syncTouch();
   if (p && 'speechSynthesis' in window) speechSynthesis.cancel();
 }
 function toMenu() {
